@@ -3,24 +3,25 @@ import pandas as pd
 import json
 import os
 
-st.set_page_config(page_title="Badminton Pro Host", layout="wide")
+st.set_page_config(page_title="Badminton Rolling Host", layout="wide")
 st.markdown("""
     <style>
     .main { background-color: #0e1117; }
     .stButton>button { border-radius: 8px; font-weight: bold; background-color: #00ffcc !important; color: black !important; }
-    h1, h2, h3 { color: #00ffcc !important; font-family: 'Segoe UI', sans-serif; }
+    h1, h2, h3 { color: #00ffcc !important; }
     div[data-testid="stExpander"] { background-color: #161b22 !important; border-radius: 10px; }
     </style>
     """, unsafe_allow_html=True)
 
-DB_FILE = "badminton_pro_v4.json"
+DB_FILE = "badminton_pro_rolling.json"
+LEVEL_MAP = {'Yếu': 1, 'TBY': 2, 'TB-': 3, 'TB': 4}
 
 
 def save_all():
     data = {
         "players": st.session_state.players,
-        "round": st.session_state.round_number,
-        "history": {str(k): v for k, v in st.session_state.pairing_history.items()}
+        "history": {str(k): v for k, v in st.session_state.pairing_history.items()},
+        "matches": st.session_state.current_matches
     }
     with open(DB_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
@@ -31,135 +32,127 @@ if 'players' not in st.session_state:
         with open(DB_FILE, "r", encoding="utf-8") as f:
             d = json.load(f)
             st.session_state.players = d.get("players", [])
-            st.session_state.round_number = d.get("round", 1)
             st.session_state.pairing_history = {tuple(eval(k)): v for k, v in d.get("history", {}).items()}
+            st.session_state.current_matches = d.get("matches", {"Sân 3": None, "Sân 4": None})
     else:
-        st.session_state.players, st.session_state.round_number, st.session_state.pairing_history = [], 1, {}
+        st.session_state.players, st.session_state.pairing_history = [], {}
+        st.session_state.current_matches = {"Sân 3": None, "Sân 4": None}
 
-# --- SIDEBAR ---
+
+def arrange_court(court_name, locked_names=None):
+    # Lấy danh sách những người Sẵn sàng và Đang không đánh ở sân khác
+    busy_players = []
+    for c, match in st.session_state.current_matches.items():
+        if c != court_name and match:
+            busy_players.extend([p['name'] for team in match for p in team])
+
+    pool = [p for p in st.session_state.players if p['status'] == "Sẵn sàng" and p['name'] not in busy_players]
+    pool = sorted(pool, key=lambda x: (x['sets'], -x['wait']))
+
+    if len(pool) < 4:
+        st.warning(f"Không đủ người để xếp trận cho {court_name}!")
+        return None
+
+    final_4 = []
+    if locked_names and len(locked_names) == 2:
+        final_4.extend([p for p in pool if p['name'] in locked_names])
+        others = [p for p in pool if p['name'] not in locked_names]
+        final_4.extend(others[:(4 - len(final_4))])
+    else:
+        final_4 = pool[:4]
+
+    if len(final_4) < 4: return None
+
+    p = sorted(final_4, key=lambda x: x['score'], reverse=True)
+    #chia cặp cân bằng
+    if locked_names and len(locked_names) == 2:
+        t1 = [x for x in final_4 if x['name'] in locked_names]
+        t2 = [x for x in final_4 if x['name'] not in locked_names]
+    else:
+        t1, t2 = [p[0], p[3]], [p[1], p[2]]
+
+    return [t1, t2]
+
 with st.sidebar:
     st.header("🏸 THÀNH VIÊN")
     with st.form("add_player", clear_on_submit=True):
         name = st.text_input("Tên khách")
         c1, c2 = st.columns(2)
         gen = c1.selectbox("Phái", ["Nam", "Nữ"])
-        lvl = c2.selectbox("Trình", ["Yếu", "TBY", "TB-", "TB"])
+        lvl = c2.selectbox("Trình", list(LEVEL_MAP.keys()))
         if st.form_submit_button("THÊM"):
             if name:
-                st.session_state.players.append({
-                    "name": name, "gender": gen, "level": lvl,
-                    "score": {'Yếu': 1, 'TBY': 2, 'TB-': 3, 'TB': 4}[lvl],
-                    "sets": 0, "wait": 0, "status": "Sẵn sàng"
-                })
+                st.session_state.players.append(
+                    {"name": name, "gender": gen, "level": lvl, "score": LEVEL_MAP[lvl], "sets": 0, "wait": 0,
+                     "status": "Sẵn sàng"})
                 save_all();
                 st.rerun()
-
-    st.markdown("---")
     if st.button("🔴 RESET BUỔI MỚI"):
         if os.path.exists(DB_FILE): os.remove(DB_FILE)
         st.session_state.clear();
         st.rerun()
 
-# --- GIAO DIỆN CHÍNH ---
-st.title(f"🏟️ ĐIỀU PHỐI VÒNG {st.session_state.round_number}")
-col_left, col_right = st.columns([2, 1.4])
+st.title("🏸 ĐIỀU PHỐI CUỐN CHIẾU")
+col_l, col_r = st.columns([2, 1.5])
 
-with col_left:
-    # Ghép cặp yêu cầu
-    ready_names = [p['name'] for p in st.session_state.players if p['status'] == "Sẵn sàng"]
-    locked = st.multiselect("🤝 Ghép cặp yêu cầu (Sân 3):", options=ready_names, max_selections=2)
+with col_l:
+    for court in ["Sân 3", "Sân 4"]:
+        with st.container():
+            st.subheader(f"🏟️ {court}")
+            current = st.session_state.current_matches.get(court)
 
-    if st.button("🚀 LẬP TRẬN ĐẤU MỚI", type="primary"):
-        ready_pool = sorted([p for p in st.session_state.players if p['status'] == "Sẵn sàng"],
-                            key=lambda x: (x['sets'], -x['wait']))
-
-        if len(ready_pool) < 4:
-            st.error("Không đủ người sẵn sàng!")
-        else:
-            final_8 = []
-            if len(locked) == 2:
-                final_8.extend([p for p in ready_pool if p['name'] in locked])
-                others = [p for p in ready_pool if p['name'] not in locked]
-                final_8.extend(others[:6])
+            if not current:
+                #nếu sân trống, hiện nút lập trận
+                ready_names = [p['name'] for p in st.session_state.players if p['status'] == "Sẵn sàng"]
+                locked = st.multiselect(f"Ghép cặp (Sân {court}):", options=ready_names, max_selections=2,
+                                        key=f"lock_{court}")
+                if st.button(f"🚀 LẬP TRẬN {court.upper()}", key=f"btn_{court}"):
+                    new_match = arrange_court(court, locked)
+                    if new_match:
+                        st.session_state.current_matches[court] = new_match
+                        save_all();
+                        st.rerun()
             else:
-                final_8 = ready_pool[:8]
+                #nếu đang có trận, hiện thông tin và nút Xong
+                t1, t2 = current
+                c1, cvs, c2 = st.columns([2, 0.5, 2])
+                c1.write(f"**{t1[0]['name']} & {t1[1]['name']}**")
+                cvs.write("vs")
+                c2.write(f"**{t2[0]['name']} & {t2[1]['name']}**")
 
+                if st.button(f"✅ XÁC NHẬN XONG {court.upper()}", key=f"done_{court}"):
+                    played_names = [p['name'] for team in current for p in team]
+                    #cập nhật lịch sử và số set
+                    for team in current:
+                        pair = tuple(sorted((team[0]['name'], team[1]['name'])))
+                        st.session_state.pairing_history[pair] = st.session_state.pairing_history.get(pair, 0) + 1
 
-            def split_team(p_list, lock=None):
-                if len(p_list) < 4: return None
-                p = sorted(p_list, key=lambda x: x['score'], reverse=True)
-                if lock:
-                    t1 = [x for x in p_list if x['name'] in lock]
-                    t2 = [x for x in p_list if x['name'] not in lock]
-                else:
-                    t1, t2 = [p[0], p[3]], [p[1], p[2]]
-                return t1, t2
+                    for p in st.session_state.players:
+                        if p['name'] in played_names:
+                            p['sets'] += 1;
+                            p['wait'] = 0
+                        elif p['status'] == "Sẵn sàng":
+                            p['wait'] += 1
+                        if p['status'] == "Tạm nghỉ 1 set":
+                            p['status'] = "Sẵn sàng"
 
+                    st.session_state.current_matches[court] = None
+                    save_all();
+                    st.rerun()
+            st.divider()
 
-            m = {"Sân 3": split_team(final_8[:4], locked if len(locked) == 2 else None)}
-            m["Sân 4"] = split_team(final_8[4:]) if len(final_8) >= 8 else None
-
-            st.session_state.current_matches = m
-            st.session_state.s3_done = False
-            st.session_state.s4_done = (m["Sân 4"] is None)
-
-    # Hiển thị trận đấu
-    if st.session_state.get('current_matches'):
-        for court, teams in st.session_state.current_matches.items():
-            if teams:
-                with st.expander(f"🏟️ {court}", expanded=True):
-                    t1, t2 = teams
-                    c1, cvs, c2 = st.columns([2, 0.5, 2])
-                    c1.markdown(f"**{t1[0]['name']} & {t1[1]['name']}**")
-                    cvs.markdown("<h3 style='text-align:center;'>VS</h3>", unsafe_allow_html=True)
-                    c2.markdown(f"**{t2[0]['name']} & {t2[1]['name']}**")
-                    if st.checkbox(f"Xong {court}", key=f"v_{court}"):
-                        if court == "Sân 3":
-                            st.session_state.s3_done = True
-                        else:
-                            st.session_state.s4_done = True
-
-        if st.session_state.s3_done and st.session_state.s4_done:
-            if st.button("XÁC NHẬN HOÀN THÀNH ✅"):
-                played = []
-                for ct in st.session_state.current_matches.values():
-                    if ct:
-                        for team in ct:
-                            p1, p2 = team[0]['name'], team[1]['name']
-                            st.session_state.pairing_history[
-                                tuple(sorted((p1, p2)))] = st.session_state.pairing_history.get(tuple(sorted((p1, p2))),
-                                                                                                0) + 1
-                            played.extend([p1, p2])
-
-                for p in st.session_state.players:
-                    if p['name'] in played:
-                        p['sets'] += 1;
-                        p['wait'] = 0
-                    elif p['status'] == "Sẵn sàng":
-                        p['wait'] += 1
-                    if p['status'] == "Tạm nghỉ 1 set":
-                        p['status'] = "Sẵn sàng"
-
-                st.session_state.round_number += 1
-                st.session_state.current_matches = None
-                save_all();
-                st.rerun()
-
-with col_right:
-    st.subheader("📊 BIỂU ĐỒ SỐ SET")
+with col_r:
+    st.subheader("📊 TRẠNG THÁI")
     if st.session_state.players:
         df_p = pd.DataFrame(st.session_state.players)
-        # Biểu đồ cột ngang cho dễ nhìn trên điện thoại
         st.bar_chart(df_p.set_index('name')['sets'])
-
-        st.markdown("---")
         for i, p in enumerate(st.session_state.players):
-            c_n, c_s = st.columns([1, 1.3])
-            wait_mark = "🔴" if p['wait'] >= 2 and p['status'] == "Sẵn sàng" else "⚪"
-            c_n.write(f"{wait_mark} **{p['name']}** ({p['sets']}s)")
-            new_s = c_s.selectbox("Trạng thái", ["Sẵn sàng", "Tạm nghỉ 1 set", "Về sớm"],
+            c_n, c_l, c_s = st.columns([1, 0.7, 1.2])
+            wait_mark = "🔴" if p['wait'] >= 2 and p['status'] == "Sẵn sàng" else ""
+            c_n.write(f"{wait_mark}**{p['name']}** ({p['sets']}s)")
+            new_lvl = c_l.selectbox("Trình", list(LEVEL_MAP.keys()), index=list(LEVEL_MAP.keys()).index(p['level']),
+                                    key=f"lvl_{i}")
+            if new_lvl != p['level']: p['level'] = new_lvl; p['score'] = LEVEL_MAP[new_lvl]; save_all(); st.rerun()
+            new_s = c_s.selectbox("Status", ["Sẵn sàng", "Tạm nghỉ 1 set", "Về sớm"],
                                   index=["Sẵn sàng", "Tạm nghỉ 1 set", "Về sớm"].index(p['status']), key=f"st_{i}")
-            if new_s != p['status']:
-                p['status'] = new_s;
-                save_all();
-                st.rerun()
+            if new_s != p['status']: p['status'] = new_s; save_all(); st.rerun()
